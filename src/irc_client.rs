@@ -1,10 +1,9 @@
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-// Unified error type
 type Result<T> = std::result::Result<T, String>;
 
 pub struct IrcClient {
@@ -25,24 +24,20 @@ impl IrcClient {
     }
 
     pub fn connect(&mut self, server: &str, port: u16) -> Result<()> {
-        // Clean up existing connection if any
         if self.stream.is_some() {
-            self.disconnect()
-                .map_err(|e| format!("Error disconnecting: {}", e))?;
+            self.disconnect()?;
         }
 
         let address = format!("{}:{}", server, port);
         match TcpStream::connect(address) {
-            Ok(stream) => {
-                // Set read timeout to avoid hanging indefinitely
-                if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(30))) {
-                    return Err(format!("Failed to set read timeout: {}", e));
-                }
+            Ok(mut stream) => {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(30)))
+                    .map_err(|e| format!("Failed to set read timeout: {}", e))?;
 
-                // Set write timeout
-                if let Err(e) = stream.set_write_timeout(Some(Duration::from_secs(10))) {
-                    return Err(format!("Failed to set write timeout: {}", e));
-                }
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(10)))
+                    .map_err(|e| format!("Failed to set write timeout: {}", e))?;
 
                 self.stream = Some(stream);
                 self.server = server.to_string();
@@ -54,7 +49,6 @@ impl IrcClient {
 
     pub fn disconnect(&mut self) -> Result<()> {
         if self.stream.is_some() {
-            // Try to send QUIT message
             let _ = self.quit();
             self.stream = None;
             self.current_channel.clear();
@@ -64,15 +58,11 @@ impl IrcClient {
 
     pub fn register(&mut self) -> Result<()> {
         if let Some(stream) = &mut self.stream {
-            // Send NICK command
             self.send_raw(&format!("NICK {}\r\n", self.nickname))?;
-
-            // Send USER command (username, hostname, servername, real name)
             self.send_raw(&format!(
                 "USER {} 0 * :{}\r\n",
                 self.nickname, self.nickname
             ))?;
-
             Ok(())
         } else {
             Err("Not connected to server".to_string())
@@ -93,30 +83,23 @@ impl IrcClient {
 
     pub fn send_raw(&mut self, message: &str) -> Result<()> {
         if let Some(stream) = &mut self.stream {
-            match stream.write_all(message.as_bytes()) {
-                Ok(_) => {
-                    // Ensure message is sent immediately
-                    match stream.flush() {
-                        Ok(_) => Ok(()),
-                        Err(e) => Err(format!("Failed to flush message: {}", e)),
-                    }
-                }
-                Err(e) => Err(format!("Failed to send message: {}", e)),
-            }
+            stream
+                .write_all(message.as_bytes())
+                .map_err(|e| format!("Failed to send message: {}", e))?;
+            stream
+                .flush()
+                .map_err(|e| format!("Failed to flush message: {}", e))?;
+            Ok(())
         } else {
             Err("Not connected to server".to_string())
         }
     }
 
-    // Start a background thread to receive messages, returning the thread handle
     pub fn start_receiver(&mut self, tx: Sender<String>) -> Result<JoinHandle<()>> {
         if let Some(stream) = &self.stream {
-            let stream_clone = match stream.try_clone() {
-                Ok(clone) => clone,
-                Err(e) => return Err(format!("Failed to clone stream: {}", e)),
-            };
-
-            // Clone nickname for use in the thread
+            let stream_clone = stream
+                .try_clone()
+                .map_err(|e| format!("Failed to clone stream: {}", e))?;
             let nickname = self.nickname.clone();
 
             let handle = thread::spawn(move || {
@@ -129,9 +112,7 @@ impl IrcClient {
         }
     }
 
-    // Separate function for the receiver loop - makes the code more maintainable
-    fn receiver_loop(stream: TcpStream, tx: Sender<String>, nickname: String) {
-        // Create a separate stream for sending PONG responses
+    fn receiver_loop(mut stream: TcpStream, tx: Sender<String>, nickname: String) {
         let mut pong_stream = match stream.try_clone() {
             Ok(clone) => clone,
             Err(e) => {
@@ -140,45 +121,51 @@ impl IrcClient {
             }
         };
 
-        // Use the original stream for reading
-        let reader = BufReader::new(stream);
+        let mut buffer = [0; 512];
+        let mut read_buffer = String::new();
 
-        for line in reader.lines() {
-            match line {
-                Ok(msg) => {
-                    // Process the message with the separate pong_stream
-                    if let Some(processed) =
-                        Self::process_message(&msg, &mut pong_stream, &nickname)
-                    {
-                        // Only send the message if processing returned something
-                        if let Err(e) = tx.send(processed) {
-                            eprintln!("Failed to send message to channel: {}", e);
-                            break;
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => break, // Connection closed
+                Ok(n) => {
+                    read_buffer.push_str(&String::from_utf8_lossy(&buffer[..n]));
+
+                    while let Some(pos) = read_buffer.find("\r\n") {
+                        let line = read_buffer[..pos].to_string();
+                        read_buffer.drain(..pos + 2);
+
+                        if let Some(processed) =
+                            Self::process_message(&line, &mut pong_stream, &nickname)
+                        {
+                            if tx.send(processed).is_err() {
+                                break;
+                            }
                         }
                     }
                 }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                Err(ref e)
+                    if e.kind() == io::ErrorKind::ConnectionReset
+                        || e.kind() == io::ErrorKind::ConnectionAborted =>
+                {
+                    break;
+                }
                 Err(e) => {
-                    // Only send actual errors, not just socket closing
-                    if e.kind() != io::ErrorKind::ConnectionAborted
-                        && e.kind() != io::ErrorKind::ConnectionReset
-                    {
-                        let _ = tx.send(format!("Error reading from server: {}", e));
-                    }
+                    let _ = tx.send(format!("Error reading from server: {}", e));
                     break;
                 }
             }
         }
 
-        // Send notification that connection was closed
         let _ = tx.send("Connection to server closed.".to_string());
     }
 
-    // Process a single IRC message
     fn process_message(msg: &str, stream: &mut TcpStream, nickname: &str) -> Option<String> {
-        // Handle PING messages immediately
         if msg.starts_with("PING") {
             let pong = msg.replace("PING", "PONG");
-            // Send PONG response
             if let Err(e) = stream.write_all(format!("{}\r\n", pong).as_bytes()) {
                 return Some(format!("Failed to send PONG: {}", e));
             }
@@ -188,16 +175,13 @@ impl IrcClient {
             return Some(format!(">>> Server ping: {}", msg));
         }
 
-        // Check for NickServ messages
         if msg.contains("NickServ") || msg.contains("nickserv") {
-            // Parse the message for more precise handling
             let parts: Vec<&str> = msg.splitn(4, ' ').collect();
             if parts.len() >= 4 {
                 let sender = parts[0].trim_start_matches(':');
                 let command = parts[1];
                 let target = parts[2];
 
-                // If it's directed to our nickname and is from NickServ
                 if (command == "NOTICE" || command == "PRIVMSG")
                     && target == nickname
                     && (sender.contains("NickServ") || sender.ends_with("!NickServ@services"))
@@ -207,7 +191,6 @@ impl IrcClient {
             }
         }
 
-        // Standard message processing
         Some(msg.to_string())
     }
 
@@ -224,7 +207,6 @@ impl IrcClient {
 
 impl Drop for IrcClient {
     fn drop(&mut self) {
-        // Ensure we attempt to quit and clean up when the client is dropped
         let _ = self.quit();
     }
 }

@@ -1,11 +1,11 @@
-//mod connection/irc_client;
-
 use crate::irc_client::IrcClient;
+//Imports for crossterm
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+// Imports for ratatui
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
