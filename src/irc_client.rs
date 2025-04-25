@@ -6,6 +6,7 @@ use std::time::Duration;
 
 type Result<T> = std::result::Result<T, String>;
 
+// Defining a basic Structure for the application
 pub struct IrcClient {
     pub stream: Option<TcpStream>,
     pub nickname: String,
@@ -13,6 +14,7 @@ pub struct IrcClient {
     pub current_channel: String,
 }
 
+// This impl block function like a classes in the rust
 impl IrcClient {
     pub fn new(nickname: &str) -> Self {
         IrcClient {
@@ -23,12 +25,17 @@ impl IrcClient {
         }
     }
 
+    // This function is responsible for the connection to the server using a TcpStream or tcpstream
+    // socket that constantly connects using the ping and pong in the irc protocol
     pub fn connect(&mut self, server: &str, port: u16) -> Result<()> {
         if self.stream.is_some() {
+            // this checks if it receives the username and pass or some user
             self.disconnect()?;
         }
 
-        let address = format!("{}:{}", server, port);
+        let address = format!("{}:{}", server, port); // This creates an address that is accepted by
+        // the irc server
+        // This match condition handles the connection with the given credencials
         match TcpStream::connect(address) {
             Ok(mut stream) => {
                 stream
@@ -56,6 +63,7 @@ impl IrcClient {
         Ok(())
     }
 
+    // This function is used to register the user with the given username
     pub fn register(&mut self) -> Result<()> {
         if let Some(stream) = &mut self.stream {
             self.send_raw(&format!("NICK {}\r\n", self.nickname))?;
@@ -69,6 +77,7 @@ impl IrcClient {
         }
     }
 
+    // Defines the join channel command
     pub fn join_channel(&mut self, channel: &str) -> Result<()> {
         let result = self.send_raw(&format!("JOIN {}\r\n", channel));
         if result.is_ok() {
@@ -77,10 +86,12 @@ impl IrcClient {
         result
     }
 
+    //  This command defines the private message capabilities of the function
     pub fn send_message(&mut self, target: &str, message: &str) -> Result<()> {
         self.send_raw(&format!("PRIVMSG {} :{}\r\n", target, message))
     }
 
+    // This function handles all the messages that can or will be sent through the tcp socket
     pub fn send_raw(&mut self, message: &str) -> Result<()> {
         if let Some(stream) = &mut self.stream {
             stream
@@ -210,4 +221,3 @@ impl Drop for IrcClient {
         let _ = self.quit();
     }
 }
-
