@@ -50,10 +50,13 @@ impl IrcClient {
                 self.server = server.to_string();
                 Ok(())
             }
-            Err(e) => Err(format!("Failed to connect: {}", e)),
+            Err(e) => Err(format!("Failed to connect: {}", e)), // This handles the error if
+                                                                // anything fails in the connection this will disconnect and emit an error that the
+                                                                // connection to the server is disconnected
         }
     }
 
+    // This function is used to actually disconnect to the server
     pub fn disconnect(&mut self) -> Result<()> {
         if self.stream.is_some() {
             let _ = self.quit();
@@ -66,7 +69,10 @@ impl IrcClient {
     // This function is used to register the user with the given username
     pub fn register(&mut self) -> Result<()> {
         if let Some(stream) = &mut self.stream {
-            self.send_raw(&format!("NICK {}\r\n", self.nickname))?;
+            self.send_raw(&format!("NICK {}\r\n", self.nickname))?; // In this function this uses
+            // the NickServ command to
+            // register the user to the
+            // server
             self.send_raw(&format!(
                 "USER {} 0 * :{}\r\n",
                 self.nickname, self.nickname
@@ -106,6 +112,7 @@ impl IrcClient {
         }
     }
 
+    // This functon is used to turn on the receiver_loop to retrieve the messages from the server
     pub fn start_receiver(&mut self, tx: Sender<String>) -> Result<JoinHandle<()>> {
         if let Some(stream) = &self.stream {
             let stream_clone = stream
@@ -174,8 +181,10 @@ impl IrcClient {
         let _ = tx.send("Connection to server closed.".to_string());
     }
 
+    // This function is responsible for handling ping and pong replies and to not drop the
+    // connection
     fn process_message(msg: &str, stream: &mut TcpStream, nickname: &str) -> Option<String> {
-        if msg.starts_with("PING") {
+        if msg.starts_with("ping") {
             let pong = msg.replace("PING", "PONG");
             if let Err(e) = stream.write_all(format!("{}\r\n", pong).as_bytes()) {
                 return Some(format!("Failed to send PONG: {}", e));
@@ -186,6 +195,8 @@ impl IrcClient {
             return Some(format!(">>> Server ping: {}", msg));
         }
 
+        // This block is responsible for the highlighting of a NickServ message that might be
+        // important and make it more readable
         if msg.contains("NickServ") || msg.contains("nickserv") {
             let parts: Vec<&str> = msg.splitn(4, ' ').collect();
             if parts.len() >= 4 {
@@ -205,6 +216,7 @@ impl IrcClient {
         Some(msg.to_string())
     }
 
+    // This function is reponsible for the propper dropping of the tcp socket
     pub fn quit(&mut self) -> Result<()> {
         if let Some(stream) = &mut self.stream {
             let _ = stream.write_all(b"QUIT :Leaving\r\n");
